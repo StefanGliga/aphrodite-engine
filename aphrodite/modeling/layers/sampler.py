@@ -1,9 +1,10 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Iterable, Callable
 
 import numpy as np
 import torch
 import torch.nn as nn
+import itertools
 
 from aphrodite.modeling.metadata import InputMetadata
 from aphrodite.modeling.megatron.communication_op import (
@@ -15,6 +16,18 @@ from aphrodite.modeling.layers.mirostat import mirostat_get_mu_hook, mirostat_up
 
 _SAMPLING_EPS = 1e-5
 
+# SAMPLER IDS:
+# 0: TopK
+# 1: TopA
+# 2: TopP
+# 3: TailFree
+# 4: Typical
+# 5: Temperature
+# 6: Penalties(Repetition, Frequency, Presence)
+# 7: Epsilon
+# 8: Eta
+# 9: Mirostat
+
 
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
@@ -23,10 +36,8 @@ class Sampler(nn.Module):
     1. Discard the hidden states that are not used for sampling (i.e., all
         tokens except the final one in each prompt).
     2. Compute the logits for the next tokens.
-    3. Apply presence and frequency penalties.
-    4. Apply temperature scaling.
-    5. Apply top-p and top-k truncation.
-    6. Sample the next tokens.
+    3. Apply different samplers(penalties, truncations, etc) in specified order
+    4. Sample the next tokens.
     Here, each sequence group within the batch can have different sampling
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
     """
@@ -49,76 +60,48 @@ class Sampler(nn.Module):
         logits = _get_logits(hidden_states, embedding, embedding_bias,
                              self.vocab_size)
 
-        # Apply presence and frequency penalties.
         output_tokens = _get_output_tokens(input_metadata)
         assert len(output_tokens) == logits.shape[0]
-        presence_penalties, frequency_penalties, repetition_penalties = _get_penalties(input_metadata)
-        assert len(presence_penalties) == logits.shape[0]
-        assert len(frequency_penalties) == logits.shape[0]
-        logits = _apply_penalties(logits, output_tokens,
-                                  presence_penalties, frequency_penalties, repetition_penalties,
-                                  self.vocab_size)
-        
         logits = _apply_logits_processors(input_metadata, logits, output_tokens)
-
-        # Apply Mirostat
-        # Note that we apply mirostat before temperature, not after like it maybe should be
-        # To be fixed by implementing customizable sampling order
-        taus, etas, mus = _get_mirostat_args(input_metadata)
-        assert len(taus) == len(etas) == len(mus) == logits.shape[0]
-        if any(tau > _SAMPLING_EPS for tau in taus):
-            logits = _apply_mirostat_v2(logits, taus, etas, mus) # mus is an inout param, :vomit:
-            mirostat_update_mu_hook(input_metadata, mus)
         
+        sampler_orders = _get_sampler_orders(input_metadata)
+        processed_logit_ubatches = []
+        for logit_microbatch, order in _chunk_logits_by_order(logits, sampler_orders):
+            for sampler_id in order:
+                #FUCKIT, IF ELIF CHAIN TIME, I'd do match if I had a guarantee everybody used py>=3.10. Not dict cuz some samplers require extras
+                if sampler_id==0: # Apply top-k truncation.
+                    logit_microbatch = top_k(logit_microbatch, input_metadata, self.vocab_size)
+                elif sampler_id==1: # Apply top-a truncation.
+                    logit_microbatch = top_a(logit_microbatch, input_metadata)
+                elif sampler_id==2: # Apply top-p truncation.
+                    logit_microbatch = top_p(logit_microbatch, input_metadata)
+                elif sampler_id==3: # Apply Tail Free Sampling, as described in https://www.trentonbricken.com/Tail-Free-Sampling/
+                    logit_microbatch = tfs(logit_microbatch, input_metadata)
+                elif sampler_id==4: # Apply Locally typical sampling, as described in https://arxiv.org/abs/2202.00666
+                    logit_microbatch = typical(logit_microbatch, input_metadata)
+                elif sampler_id==5: # Apply temperature scaling.      
+                    logit_microbatch = temperature(logit_microbatch, input_metadata)
+                elif sampler_id==6: # Apply presence and frequency penalties.
+                    logit_microbatch = penalties(logit_microbatch, output_tokens, input_metadata, self.vocab_size)
+                elif sampler_id==7: # Apply Epsilon sampling, as described in https://arxiv.org/abs/2210.15191
+                    logit_microbatch = epsilon_cutoff(logit_microbatch, input_metadata)
+                elif sampler_id==8: # Apply Eta sampling, as described in https://arxiv.org/abs/2210.15191
+                    logit_microbatch = eta_cutoff(logit_microbatch, input_metadata)
+                elif sampler_id==9: # Apply Mirostat 
+                    logit_microbatch = mirostat(logit_microbatch, input_metadata)
+                else:
+                    # We silently ignore non existent samplers for now, can be changed later to error
+                    pass
+            processed_logit_ubatches.append(logit_microbatch)
         
-        # Apply Eta sampling, as described in https://arxiv.org/abs/2210.15191
-        eta_cutoffs = _get_eta_cutoffs(input_metadata)
-        assert len(eta_cutoffs) == logits.shape[0]
-        if any(eta > _SAMPLING_EPS for eta in eta_cutoffs):
-            logits = _apply_eta_cutoff(logits, eta_cutoffs)
-
-        # Apply Locally typical sampling, as described in https://arxiv.org/abs/2202.00666
-        typical_ps = _get_typical_ps(input_metadata)
-        assert len(typical_ps) == logits.shape[0]
-        if any(typ_p < 1.0 - _SAMPLING_EPS for typ_p in typical_ps):
-            logits = _apply_typical_sampling(logits, typical_ps)
-
-        # Apply Tail Free Sampling, as described in https://www.trentonbricken.com/Tail-Free-Sampling/
-        tfss = _get_tfs(input_metadata)
-        assert len(tfss) == logits.shape[0]
-        if any(z < 1.0 - _SAMPLING_EPS for z in tfss):
-            logits = _apply_tfs(logits, tfss)
-
-        epsilon_cutoffs = _get_epsilon_cutoffs(input_metadata)
-        assert len(epsilon_cutoffs) == logits.shape[0]
-        if any(epsilon > _SAMPLING_EPS for epsilon in epsilon_cutoffs):
-            logits = _apply_epsilon_cutoff(logits, epsilon_cutoffs)
-
-        # Apply temperature scaling.
-        temperatures = _get_temperatures(input_metadata)
-        assert len(temperatures) == logits.shape[0]
-        if any(t != 1.0 for t in temperatures):
-            t = torch.tensor(temperatures,
-                             dtype=logits.dtype,
-                             device=logits.device)
-            # Use in-place division to avoid creating a new tensor.
-            logits.div_(t.unsqueeze(dim=1))
-
-        # Apply top-p, top-k, and top-a truncation.
-        top_ps, top_ks, top_as = _get_top_a_top_p_top_k(input_metadata, self.vocab_size)
-        assert len(top_ps) == len(top_ks) == logits.shape[0]
-        do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
-        do_top_k = any(k != self.vocab_size for k in top_ks)
-        do_top_a = any(a > _SAMPLING_EPS for a in top_as)
-        if do_top_p or do_top_k or do_top_a:
-            logits = _apply_top_a_top_p_top_k(logits, top_ps, top_ks, top_as)
-
+        new_logits = torch.cat(processed_logit_ubatches, dim=0)
+        
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
-        probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        probs = torch.softmax(new_logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
         # Use log_softmax to ensure numerical stability.
-        logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        logprobs = torch.log_softmax(new_logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
         return _sample(probs, logprobs, input_metadata)
@@ -143,9 +126,30 @@ def _prune_hidden_states(
 ) -> torch.Tensor:
     return hidden_states.index_select(0, input_metadata.last_token_indices)
 
-def _get_penalties(
-        input_metadata: InputMetadata) -> Tuple[List[float], List[float]]:
-    # Collect the presence and frequency penalties.
+
+def _get_sampler_orders(input_metadata: InputMetadata) -> List[List[int]]:
+    sampler_orders: List[Tuple[int]] = []
+    for seq_group in input_metadata.seq_groups:
+        seq_ids, sampling_params = seq_group
+        order = sampling_params.sampler_order
+        sampler_orders += [order] * len(seq_ids)
+    return sampler_orders
+
+
+def _chunk_logits_by_order(logits: torch.Tensor, orders: List[List[int]]) -> Iterable[Tuple[torch.Tensor, List[int]]]:
+    grouped_order = [(order, len(list(tmp))) for order, tmp in itertools.groupby(orders)]
+    ubatch_sizes = [l for _, l in grouped_order]
+    ubatches = torch.split(logits, ubatch_sizes, dim=0)
+    squashed_orders = [order for order, _ in grouped_order]
+    return zip(ubatches, squashed_orders)
+
+
+def penalties(
+    logits: torch.Tensor,
+    output_tokens: List[List[int]],
+    input_metadata: InputMetadata,
+    vocab_size: int) -> torch.Tensor:
+    # Collect the presence, frequency and repetition penalties.
     presence_penalties: List[float] = []
     frequency_penalties: List[float] = []
     repetition_penalties: List[float] = []
@@ -154,7 +158,12 @@ def _get_penalties(
         presence_penalties += [sampling_params.presence_penalty] * len(seq_ids)
         frequency_penalties += [sampling_params.frequency_penalty] * len(seq_ids)
         repetition_penalties += [sampling_params.repetition_penalty] * len(seq_ids)
-    return presence_penalties, frequency_penalties, repetition_penalties
+    assert len(presence_penalties) == logits.shape[0]
+    assert len(frequency_penalties) == logits.shape[0]
+    assert len(repetition_penalties) == logits.shape[0]
+    return _apply_penalties(logits, output_tokens,
+                            presence_penalties, frequency_penalties, repetition_penalties,
+                            vocab_size)
 
 
 def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
@@ -167,9 +176,10 @@ def _get_output_tokens(input_metadata: InputMetadata) -> List[List[int]]:
     return output_tokens
 
 
-def _get_mirostat_args(
+def mirostat(
+    logits: torch.Tensor,
     input_metadata: InputMetadata
-) -> Tuple[List[float], List[float], List[float]]:
+) -> torch.Tensor:
     taus: List[float] = []
     etas: List[float] = []
     
@@ -178,8 +188,13 @@ def _get_mirostat_args(
         etas += [params.mirostat_eta] * len(seq_ids)  # AKA the learning rate
 
     mus: List[float] = mirostat_get_mu_hook(input_metadata) # Hide global state behind a function
+    # TODO: Allow this to properly work/ignore when params are invalid
+    assert len(taus) == len(etas) == len(mus) == logits.shape[0]
+    if any(tau > _SAMPLING_EPS for tau in taus):
+        logits = _apply_mirostat_v2(logits, taus, etas, mus) # mus is an inout param, :vomit:
+        mirostat_update_mu_hook(input_metadata, mus)
+    return logits
 
-    return taus, etas, mus
 
 
 def _apply_mirostat_v2(
@@ -288,22 +303,23 @@ def _apply_penalties(
     repetition_penalties = torch.tensor(repetition_penalties,
                                       dtype=logits.dtype,
                                       device=logits.device)
-
-    # We follow the definition in OpenAI API.
-    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
-    logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
+    
     presence_mask = (bin_counts > 0)
-    logits -= presence_penalties.unsqueeze(dim=1) * presence_mask
-
+    # TODO: 1) Add information theorethical backed rep pen 2) Investigate rep pen more akin to freq pen as opposed to pres pen 3) Slopes
     # Effectively: If token is present and logit is positive, divide logit by rep_pen.
     #              If token is present and logit is negative, multiply logit by rep_pen.
     logits += logits * (1 / repetition_penalties.unsqueeze(dim=1) - 1) * presence_mask * (logits > 0)
     logits += logits * (repetition_penalties.unsqueeze(dim=1) - 1) * presence_mask * (logits < 0)
 
+    # We follow the definition in OpenAI API.
+    # Refer to https://platform.openai.com/docs/api-reference/parameter-details
+    logits -= frequency_penalties.unsqueeze(dim=1) * bin_counts
+    logits -= presence_penalties.unsqueeze(dim=1) * presence_mask
+
     return logits
 
 
-def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
+def temperature(logits: torch.Tensor, input_metadata: InputMetadata) -> torch.Tensor:
     # Collect the temperatures for the logits.
     temperatures: List[float] = []
     for seq_group in input_metadata.seq_groups:
@@ -315,16 +331,56 @@ def _get_temperatures(input_metadata: InputMetadata) -> List[float]:
             # Set the temperature to 1 to avoid division by zero.
             temperature = 1.0
         temperatures += [temperature] * len(seq_ids)
-    return temperatures
+    assert len(temperatures) == logits.shape[0]
+    if any(t != 1.0 for t in temperatures):
+        t = torch.tensor(temperatures,
+                        dtype=logits.dtype,
+                        device=logits.device)
+        # Use in-place division to avoid creating a new tensor.
+        logits.div_(t.unsqueeze(dim=1))
+    return logits
 
 
-def _get_top_a_top_p_top_k(
+def top_a(
+    logits: torch.Tensor,
+    input_metadata: InputMetadata,
+) -> torch.Tensor:
+    top_as: List[float] = []
+    for seq_group in input_metadata.seq_groups:
+        seq_ids, sampling_params = seq_group
+
+        top_as += [sampling_params.top_a] * len(seq_ids)
+
+    assert len(top_as) == logits.shape[0]
+    do_top_a = any(a > _SAMPLING_EPS for a in top_as)
+    if do_top_a:
+            return _apply_top_a(logits, top_as)
+    return logits
+
+
+def top_p(
+    logits: torch.Tensor,
+    input_metadata: InputMetadata,
+) -> torch.Tensor:
+    top_ps: List[float] = []
+    for seq_group in input_metadata.seq_groups:
+        seq_ids, sampling_params = seq_group
+
+        top_ps += [sampling_params.top_p] * len(seq_ids)
+
+    assert len(top_ps) == logits.shape[0]
+    do_top_p = any(p < 1.0 - _SAMPLING_EPS for p in top_ps)
+    if do_top_p:
+            return _apply_top_p(logits, top_ps)
+    return logits
+
+
+def top_k(
+    logits: torch.Tensor,
     input_metadata: InputMetadata,
     vocab_size: int,
-) -> Tuple[List[float], List[int], List[float]]:
-    top_ps: List[float] = []
+) -> torch.Tensor:
     top_ks: List[int] = []
-    top_as: List[float] = []
     for seq_group in input_metadata.seq_groups:
         seq_ids, sampling_params = seq_group
         # k should not be greater than the vocab size.
@@ -332,69 +388,110 @@ def _get_top_a_top_p_top_k(
         # k=-1 means no truncation.
         top_k = vocab_size if top_k == -1 else top_k
 
-        top_ps += [sampling_params.top_p] * len(seq_ids)
         top_ks += [top_k] * len(seq_ids)
-        top_as += [sampling_params.top_a] * len(seq_ids)
 
-    return top_ps, top_ks, top_as
+    assert len(top_ks) == logits.shape[0]
+    do_top_k = any(k != vocab_size for k in top_ks)
+    if do_top_k:
+            return _apply_top_k(logits, top_ks)
+    return logits
 
 
 
-def _get_tfs(input_metadata: InputMetadata) -> List[float]:
+def tfs(logits: torch.Tensor, input_metadata: InputMetadata) -> torch.Tensor:
     tfss: List[float] = []
     for seq_group in input_metadata.seq_groups:
         seq_ids, sampling_params = seq_group
         z = sampling_params.tfs
         tfss += [z] * len(seq_ids)
-    return tfss
+    assert len(tfss) == logits.shape[0]
+    if any(z < 1.0 - _SAMPLING_EPS for z in tfss):
+        return _apply_tfs(logits, tfss)
+    return logits
 
 
-def _get_eta_cutoffs(input_metadata: InputMetadata) -> List[float]:
+def eta_cutoff(logits: torch.Tensor, input_metadata: InputMetadata) -> torch.Tensor:
     eta_cutoffs: List[float] = []
     for seq_group in input_metadata.seq_groups:
         seq_ids, sampling_params = seq_group
         eta_cutoff = sampling_params.eta_cutoff
         eta_cutoffs += [eta_cutoff] * len(seq_ids)
-    return eta_cutoffs
+    assert len(eta_cutoffs) == logits.shape[0]
+    if any(eta > _SAMPLING_EPS for eta in eta_cutoffs):
+        return _apply_eta_cutoff(logits, eta_cutoffs)
+    return logits
 
 
-def _get_epsilon_cutoffs(input_metadata: InputMetadata) -> List[float]:
+def epsilon_cutoff(logits: torch.Tensor, input_metadata: InputMetadata) -> torch.Tensor:
     epsilon_cutoffs: List[float] = []
     for seq_group in input_metadata.seq_groups:
         seq_ids, sampling_params = seq_group
         epsilon_cutoff = sampling_params.epsilon_cutoff
         epsilon_cutoffs += [epsilon_cutoff] * len(seq_ids)
-    return epsilon_cutoffs
+    assert len(epsilon_cutoffs) == logits.shape[0]
+    if any(epsilon > _SAMPLING_EPS for epsilon in epsilon_cutoffs):
+        return _apply_epsilon_cutoff(logits, epsilon_cutoffs)
+    return logits
 
 
-def _get_typical_ps(input_metadata: InputMetadata) -> List[float]:
+def typical(logits: torch.Tensor, input_metadata: InputMetadata) -> torch.Tensor:
     typical_ps: List[float] = []
     for seq_group in input_metadata.seq_groups:
         seq_ids, sampling_params = seq_group
         typical_p = sampling_params.typical_p
         typical_ps += [typical_p] * len(seq_ids)
-    return typical_ps
+    assert len(typical_ps) == logits.shape[0]
+    if any(typ_p < 1.0 - _SAMPLING_EPS for typ_p in typical_ps):
+        return _apply_typical_sampling(logits, typical_ps)
+    return logits
 
 
-def _apply_top_a_top_p_top_k(
+def _apply_top_a(
     logits: torch.Tensor,
-    top_ps: List[float],
-    top_ks: List[int],
     top_as: List[float],
 ) -> torch.Tensor:
-    ts_p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
-    ts_k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
     ts_a = torch.tensor(top_as, dtype=logits.dtype, device=logits.device)
     logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
 
-    # Apply top-p and top-a.
+    # Apply top-a
+    probs_sort = logits_sort.softmax(dim=-1)
+    top_a_thresholds = torch.pow(probs_sort[:, 0], 2) * ts_a
+    top_a_mask = (probs_sort < top_a_thresholds.unsqueeze(1)) # Cull logits below the top-a threshold
+    top_a_mask[:, 0] = False # Guarantee at least one token is pickable
+    logits_sort[top_a_mask] = -float("inf")
+
+    # Re-sort the probabilities.
+    logits = torch.gather(logits_sort,
+                          dim=-1,
+                          index=torch.argsort(logits_idx, dim=-1))
+    return logits
+
+def _apply_top_p(
+    logits: torch.Tensor,
+    top_ps: List[float],
+) -> torch.Tensor:
+    ts_p = torch.tensor(top_ps, dtype=logits.dtype, device=logits.device)
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
+
+    # Apply top-p.
     probs_sort = logits_sort.softmax(dim=-1)
     probs_sum = probs_sort.cumsum(dim=-1)
-    top_a_thresholds = torch.pow(probs_sort[:, 0], 2) * ts_a
-    top_ap_mask = (probs_sort < top_a_thresholds.unsqueeze(1)) # Cull logits below the top-a threshold
-    top_ap_mask.logical_or_(probs_sum > ts_p.unsqueeze(dim=1)) # Cull logits above the top-p summation threshold
-    top_ap_mask[:, 0] = False # Guarantee at least one token is pickable
-    logits_sort[top_ap_mask] = -float("inf")
+    top_p_mask = probs_sum > ts_p.unsqueeze(dim=1) # Cull logits above the top-p summation threshold
+    top_p_mask[:, 0] = False # Guarantee at least one token is pickable
+    logits_sort[top_p_mask] = -float("inf")
+
+    # Re-sort the probabilities.
+    logits = torch.gather(logits_sort,
+                          dim=-1,
+                          index=torch.argsort(logits_idx, dim=-1))
+    return logits
+
+def _apply_top_k(
+    logits: torch.Tensor,
+    top_ks: List[int],
+) -> torch.Tensor:
+    ts_k = torch.tensor(top_ks, dtype=torch.int, device=logits.device)
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=True)
     
     # Apply top-k.
     # Create a mask for the top-k elements.

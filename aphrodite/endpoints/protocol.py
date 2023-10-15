@@ -5,7 +5,8 @@ class SamplingParams(BaseModel):
     n: int = Field(1, alias="n")
     best_of: Optional[int] = Field(None, alias="best_of")
     presence_penalty: float = Field(0.0, alias="presence_penalty")
-    frequency_penalty: float = Field(0.0, alias="rep_pen")
+    frequency_penalty: float = Field(0.0, alias="frequency_penalty")
+    repetition_penalty: float = Field(1.0, alias="rep_pen")
     temperature: float = Field(1.0, alias="temperature")
     top_p: float = Field(1.0, alias="top_p")
     top_k: float = Field(-1, alias="top_k")
@@ -16,6 +17,7 @@ class SamplingParams(BaseModel):
     mirostat_mode: int = Field(0, alias="mirostat_mode")
     mirostat_tau: float = Field(0.0, alias="mirostat_tau")
     mirostat_eta: float = Field(0.0, alias="mirostat_eta")
+    sampler_order: List[int] = Field([6, 9, 8, 4, 3, 7, 5, 0], alias="sampler_order")
     use_beam_search: bool = Field(False, alias="use_beam_search")
     length_penalty: float = Field(1.0, alias="length_penalty")
     early_stopping: Union[bool, str] = Field(False, alias="early_stopping")
@@ -65,7 +67,7 @@ class KAIGenerationInputSchema(BaseModel):
     disable_input_formatting: Optional[bool]
     frmtadsnsp: Optional[bool]
     quiet: Optional[bool]
-    sampler_order: Optional[conlist(int, min_items=6)]
+    sampler_order: Optional[conlist(int)]
     sampler_seed: Optional[conint(ge=0, le=2**64 - 1)]
     sampler_full_determinism: Optional[bool]
     stop_sequence: Optional[List[str]]

@@ -69,6 +69,7 @@ class SamplingParams:
         mirostat_eta: Float that controls the learning rate(allowed
             deviation from target surprise) for Mirostat.
             Must be positive, set **all** Mirostat options to 0 to disable it.
+        sampler_order: List of sampler IDs specifying the order in which to apply them.
         use_beam_search: Whether to use beam search instead of sampling.
         length_penalty: Float that penalizes sequences based on their length.
             Used in beam search.
@@ -112,6 +113,7 @@ class SamplingParams:
         mirostat_mode: int = 0,
         mirostat_tau: float = 0.0,
         mirostat_eta: float = 0.0,
+        sampler_order: List[int] = [6, 9, 8, 4, 3, 7, 5, 0], # Default to old order
         use_beam_search: bool = False,
         length_penalty: float = 1.0,
         early_stopping: Union[bool, str] = False,
@@ -139,6 +141,7 @@ class SamplingParams:
         self.mirostat_mode = mirostat_mode
         self.mirostat_tau = mirostat_tau
         self.mirostat_eta = mirostat_eta
+        self.sampler_order = sampler_order
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -205,12 +208,13 @@ class SamplingParams:
             raise ValueError(f"typical_p must be in (0, 1], got {self.typical_p}.")
         if self.mirostat_mode != 0 and self.mirostat_mode != 2:
             raise ValueError(f"Only Mirostat v2 and disabled(0) supported, got {self.mirostat_mode}")
-        if self.mirostat_mode == 0 and (self.mirostat_eta != 0 or self.mirostat_tau != 0):
-            raise ValueError(f"When Mirostat is disabled, tau and eta must be 0, got:({self.mirostat_tau},{self.mirostat_eta})")
         if self.mirostat_mode != 0 and not self.mirostat_eta > 0:
             raise ValueError(f"mirostat_eta must be positive, got {self.mirostat_eta}")
         if self.mirostat_mode != 0 and not self.mirostat_tau > 0:
             raise ValueError(f"mirostat_tau must be positive, got {self.mirostat_tau}")
+        if min(self.sampler_order) < 0:
+            raise ValueError(f"Invalid sampler order, negative ID provided")
+        # Not specifying all samplers is not an error
         if self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
@@ -277,6 +281,7 @@ class SamplingParams:
                 f"mirostat_mode={self.mirostat_mode}, "
                 f"mirostat_tau={self.mirostat_tau}, "
                 f"mirostat_eta={self.mirostat_eta}, "
+                f"sampler_order={self.sampler_order}, "
                 f"use_beam_search={self.use_beam_search}, "
                 f"length_penalty={self.length_penalty}, "
                 f"early_stopping={self.early_stopping}, "
