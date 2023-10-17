@@ -184,7 +184,7 @@ def mirostat(
     etas: List[float] = []
     
     for seq_ids, params in input_metadata.seq_groups:
-        taus += [params.mirostat_tau] * len(seq_ids)  # AKA the targeted surprise
+        taus += [params.mirostat_tau * (params.mirostat_mode==2)] * len(seq_ids)  # AKA the targeted surprise
         etas += [params.mirostat_eta] * len(seq_ids)  # AKA the learning rate
 
     mus: List[float] = mirostat_get_mu_hook(input_metadata) # Hide global state behind a function

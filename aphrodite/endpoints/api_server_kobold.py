@@ -64,6 +64,8 @@ def prepare_engine_payload(kai_payload: KAIGenerationInputSchema) -> Tuple[Sampl
     # https://github.com/KoboldAI/KoboldAI-Client/wiki/Settings
     kai_payload.top_k = kai_payload.top_k if kai_payload.top_k != 0.0 else -1
     kai_payload.tfs = max(_SAMPLING_EPS, kai_payload.tfs)
+    if 9 not in kai_payload.sampler_order: # TODO: Figure out how KAI wants to handle mirostat and do it properly/in a compatible way
+        kai_payload.sampler_order.insert(1, 9)
     if kai_payload.temperature < _SAMPLING_EPS:
         # temp < _SAMPLING_EPS: greedy sampling
         kai_payload.n = 1

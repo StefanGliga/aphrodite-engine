@@ -17,7 +17,7 @@ class SamplingParams(BaseModel):
     mirostat_mode: int = Field(0, alias="mirostat_mode")
     mirostat_tau: float = Field(0.0, alias="mirostat_tau")
     mirostat_eta: float = Field(0.0, alias="mirostat_eta")
-    sampler_order: List[int] = Field([6, 9, 8, 4, 3, 7, 5, 0], alias="sampler_order")
+    sampler_order: List[int] = Field([6, 9, 8, 4, 3, 7, 5, 0, 1, 2], alias="sampler_order")
     use_beam_search: bool = Field(False, alias="use_beam_search")
     length_penalty: float = Field(1.0, alias="length_penalty")
     early_stopping: Union[bool, str] = Field(False, alias="early_stopping")

@@ -214,6 +214,8 @@ class SamplingParams:
             raise ValueError(f"mirostat_tau must be positive, got {self.mirostat_tau}")
         if min(self.sampler_order) < 0:
             raise ValueError(f"Invalid sampler order, negative ID provided")
+        if len(set(self.sampler_order)) != len(self.sampler_order):
+            raise ValueError(f"Invalid sampler order, duplicate ID provided")
         # Not specifying all samplers is not an error
         if self.max_tokens < 1:
             raise ValueError(
