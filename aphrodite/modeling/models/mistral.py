@@ -356,6 +356,7 @@ class MistralForCausalLM(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                oldname = name
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
@@ -365,6 +366,7 @@ class MistralForCausalLM(nn.Module):
                 try:
                     param = params_dict[name]
                 except KeyError:
+                    name = oldname
                     continue
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
