@@ -370,7 +370,7 @@ class MistralForCausalLM(nn.Module):
                     continue
                 if name.endswith(".codebook_id") and name not in params_dict:
                     continue
-                if name.contains("upgate_proj") and name not in params_dict:
+                if "upgate_proj" in name and name not in params_dict:
                     name.replace("upgate_proj", "gate_up_proj")
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
