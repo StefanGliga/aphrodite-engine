@@ -57,7 +57,10 @@ class QuipConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "QuipConfig":
         codebook = cls.get_from_keys(config, ["codebook"])
-        use_rand = cls.get_from_keys(config, ["use_rand"])
+        try:
+            use_rand = cls.get_from_keys(config, ["use_rand"])
+        except ValueError:
+            use_rand = True # hopefully a sane default
         return cls(codebook, use_rand)
 
     def get_linear_method(self) -> "QuipLinearMethod":

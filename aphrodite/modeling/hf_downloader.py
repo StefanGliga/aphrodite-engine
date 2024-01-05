@@ -90,6 +90,8 @@ def get_quant_config(
 ) -> QuantizationConfig:
     quant_cls = get_quantization_config(quantization)
     hf_quant_config = getattr(hf_config, "quantization_config", None)
+    if quantization == "quip" and hf_quant_config is None:
+        hf_quant_config = getattr(hf_config, "quip_params", None)
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
 
