@@ -70,7 +70,7 @@ class QuipConfig(QuantizationConfig):
         return []
 
     def merge_weight(self) -> bool:
-        return False
+        return True
 
 
 class QuipLinearMethod(LinearMethodBase):
