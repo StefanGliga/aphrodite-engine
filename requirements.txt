@@ -18,3 +18,4 @@ colorlog
 einops # for phi
 aioprometheus[starlette] # for prometheus metrics
 fast-hadamard-transform # for QuIP
+scipy # for QuIP
