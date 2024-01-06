@@ -94,6 +94,7 @@ class GPTQLinearMethod(LinearMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        fusion_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         del output_size  # Unused.
         if input_size_per_partition % self.quant_config.group_size != 0:

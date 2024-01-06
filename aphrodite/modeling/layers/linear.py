@@ -24,7 +24,8 @@ class LinearMethodBase(ABC):
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int,
-                       params_dtype: torch.dtype) -> Dict[str, Any]:
+                       params_dtype: torch.dtype,
+                       fusion_count: Optional[int] = None) -> Dict[str, Any]:
         """Create weights for a linear layer."""
         raise NotImplementedError
 
@@ -51,7 +52,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def create_weights(self, input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int,
-                       params_dtype: torch.dtype) -> Dict[str, Any]:
+                       params_dtype: torch.dtype,
+                       fusion_count: Optional[int] = None) -> Dict[str, Any]:
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
                                        device=torch.cuda.current_device(),
@@ -156,6 +158,7 @@ class ColumnParallelLinear(torch.nn.Module):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         linear_method: Optional[LinearMethodBase] = None,
+        fusion_count: Optional[int] = None,
     ):
         super().__init__()
 
@@ -175,7 +178,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.linear_method = linear_method
         self.linear_weights = self.linear_method.create_weights(
             self.input_size, self.output_size_per_partition, self.input_size,
-            self.output_size, self.params_dtype)
+            self.output_size, self.params_dtype, fusion_count)
         for name, weight in self.linear_weights.items():
             if isinstance(weight, torch.nn.parameter.Parameter):
                 self.register_parameter(name, weight)
@@ -249,12 +252,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         linear_method: Optional[LinearMethodBase] = None,
+        fusion_count: Optional[int] = 2,
     ):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size, sum(output_sizes), bias, gather_output,
-                         skip_bias_add, params_dtype, linear_method)
+                         skip_bias_add, params_dtype, linear_method, fusion_count)
 
     def weight_loader(self,
                       param: Parameter,
@@ -368,7 +372,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         output_size = (self.num_heads +
                        2 * self.num_kv_heads) * tp_size * self.head_size
         super().__init__(input_size, output_size, bias, False, skip_bias_add,
-                         params_dtype, linear_method)
+                         params_dtype, linear_method, fusion_count=3)
 
     def weight_loader(self,
                       param: Parameter,

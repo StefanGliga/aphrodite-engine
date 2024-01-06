@@ -92,6 +92,7 @@ class QuipLinearMethod(LinearMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        fusion_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         if input_size != input_size_per_partition or output_size != output_size_per_partition:
             raise ValueError(
@@ -147,6 +148,14 @@ class QuipLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         set_weight_attrs(SV, {"ignore_warning": True})
+        if fusion_count is not None:
+            fuse_scales = Parameter(
+                torch.ones(fusion_count, device="cuda", dtype=params_dtype),
+                requires_grad=False,
+            )
+            set_weight_attrs(fuse_scales, {"ignore_warning": True})
+            weights.update({"fuse_scales": fuse_scales})
+
         weights.update({
             "Qidxs": Qidxs,
             "Wscale": Wscale,
@@ -184,7 +193,7 @@ class QuipLinearMethod(LinearMethodBase):
                                 self.grid_packed_abs)
         else:
             W_decompressed = torch.empty(
-                m, n * 8, dtype=torch.float16, device=x.device
+                m, n * self.pack, dtype=torch.float16, device=x.device # the 8 here meant pack, right?
             )
             ops.quip_decompress(
                 weights["Qidxs"], self.grid_packed_abs, W_decompressed
@@ -195,6 +204,10 @@ class QuipLinearMethod(LinearMethodBase):
                                weights["q_out_features"])[..., :out_dim]
         if "SV" in weights:
             out = out * weights["SV"]
+        if "fuse_scales" in weights:
+            temp = torch.tensor_split(out, weights["fuse_scales"].shape[0], dim=-1)
+            temp = [weights["fuse_scales"][i] * temp[i] for i in range(len(temp))] # potential performance problem here
+            out = torch.cat(temp, dim=-1)
         out = out.view(*x.shape[:-1], out.shape[-1])
         out = out + bias if bias is not None else out
         return out
