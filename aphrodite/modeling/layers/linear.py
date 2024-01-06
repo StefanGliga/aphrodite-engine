@@ -209,6 +209,8 @@ class ColumnParallelLinear(torch.nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
+        if _quip_check_dtype_mismatch(param_data, loaded_weight):
+            loaded_weight = _reinterpret_tensor(loaded_weight, param_data.dtype)
         if output_dim is not None:
             shard_size = param_data.shape[output_dim]
             start_idx = tp_rank * shard_size
@@ -276,6 +278,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       loaded_shard_id: Optional[int] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
+        if _quip_check_dtype_mismatch(param_data, loaded_weight):
+            loaded_weight = _reinterpret_tensor(loaded_weight, param_data.dtype)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
@@ -390,6 +394,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                       loaded_shard_id: Optional[str] = None):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
+        if _quip_check_dtype_mismatch(param_data, loaded_weight):
+            loaded_weight = _reinterpret_tensor(loaded_weight, param_data.dtype)
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
