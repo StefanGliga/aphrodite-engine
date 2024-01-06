@@ -82,8 +82,8 @@ class QuipLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: QuipConfig):
         self.quant_config = quant_config
         self.grid_packed_abs = get_packed_abs_grid().to(device="cuda")
-        self.pack = 32
-        self.idx_dtype = torch.int64
+        self.pack = 8
+        self.idx_dtype = torch.int16
 
     def create_weights(
         self,
@@ -193,7 +193,7 @@ class QuipLinearMethod(LinearMethodBase):
                                 self.grid_packed_abs)
         else:
             W_decompressed = torch.empty(
-                m, n * self.pack, dtype=torch.float16, device=x.device # the 8 here meant pack, right?
+                m, n * 8, dtype=torch.float16, device=x.device
             )
             ops.quip_decompress(
                 weights["Qidxs"], self.grid_packed_abs, W_decompressed

@@ -16,6 +16,9 @@ from aphrodite.common.logger import init_logger
 
 logger = init_logger(__name__)
 
+def _reinterpret_tensor(tensor: torch.Tensor, dtype: torch.dtype):
+    return torch.tensor(tensor.untyped_storage(), dtype=dtype)
+
 
 class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""

@@ -353,6 +353,8 @@ class MistralForCausalLM(nn.Module):
                 model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "upgate_proj" in name:
+                    name = name.replace("upgate_proj", "gate_up_proj")
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -377,8 +379,6 @@ class MistralForCausalLM(nn.Module):
                     continue
                 if name.endswith(".codebook_id") and name not in params_dict:
                     continue
-                if "upgate_proj" in name and name not in params_dict:
-                    name = name.replace("upgate_proj", "gate_up_proj")
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
