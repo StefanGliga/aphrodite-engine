@@ -17,7 +17,9 @@ from aphrodite.common.logger import init_logger
 logger = init_logger(__name__)
 
 def _reinterpret_tensor(tensor: torch.Tensor, dtype: torch.dtype):
-    return torch.tensor(tensor.untyped_storage(), dtype=dtype)
+    unshaped = torch.tensor(tensor.untyped_storage(), dtype=dtype)
+    new_shape = list(tensor.shape[:-1]) + [-1]
+    return unshaped.reshape(new_shape)
 
 def _quip_check_dtype_mismatch(dst: torch.Tensor, src: torch.Tensor):
     return (dst.dtype == torch.int16 and src.dtype == torch.int64
