@@ -19,6 +19,10 @@ logger = init_logger(__name__)
 def _reinterpret_tensor(tensor: torch.Tensor, dtype: torch.dtype):
     return torch.tensor(tensor.untyped_storage(), dtype=dtype)
 
+def _quip_check_dtype_mismatch(dst: torch.Tensor, src: torch.Tensor):
+    return (dst.dtype == torch.int16 and src.dtype == torch.int64
+             and dst.shape[-1] == src.shape[-1]/4)
+
 
 class LinearMethodBase(ABC):
     """Base class for different (maybe quantized) linear methods."""
@@ -527,6 +531,8 @@ class RowParallelLinear(torch.nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
+        if _quip_check_dtype_mismatch(param_data, loaded_weight):
+            loaded_weight = _reinterpret_tensor(loaded_weight, param_data.dtype)
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
             start_idx = tp_rank * shard_size
