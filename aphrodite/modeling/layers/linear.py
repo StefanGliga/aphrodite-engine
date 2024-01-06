@@ -18,12 +18,12 @@ logger = init_logger(__name__)
 
 def _reinterpret_tensor(tensor: torch.Tensor, dtype: torch.dtype):
     unshaped = torch.tensor(tensor.untyped_storage(), dtype=dtype)
-    new_shape = list(tensor.shape[:-1]) + [-1]
+    new_shape = list(*tensor.shape[:-1]) + [-1]
     return unshaped.reshape(new_shape)
 
 def _quip_check_dtype_mismatch(dst: torch.Tensor, src: torch.Tensor):
     return (dst.dtype == torch.int16 and src.dtype == torch.int64
-             and dst.shape[-1] == src.shape[-1]/4)
+             and dst.shape[-1] == src.shape[-1]*4)
 
 
 class LinearMethodBase(ABC):
